@@ -6,6 +6,7 @@ Main FastAPI application
 from fastapi import FastAPI
 from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
 from .models import WebPageRequest, ClassificationResponse
+from .llm import llm
 
 app = FastAPI(
     title="Semantic Study Guardian",
@@ -16,10 +17,7 @@ app = FastAPI(
 
 @app.get("/")
 def health_check():
-    """
-    Health check endpoint.
-    Returns: {"status": "ok"} if backend is running.
-    """
+    """Health check endpoint."""
     return {
         "status": "ok",
         "message": "Semantic Study Guardian Backend is running",
@@ -30,21 +28,34 @@ def health_check():
 
 @app.post("/classify")
 def classify(request: WebPageRequest) -> ClassificationResponse:
-    """
-    Classify a webpage based on study goal and webpage information.
+    """Classify a webpage based on study goal and webpage information."""
     
-    Input: WebPageRequest (study_goal, title, url, meta_tags, content_preview)
-    Output: ClassificationResponse (decision, reason, confidence, page_type)
-    """
-    
-    # TEMPORARY: Dummy response for testing
-    # Later, this will call the actual LLM
-    
-    dummy_response = ClassificationResponse(
-        decision="ALLOW",
-        reason="Testing - LLM integration coming next",
-        confidence=0.5,
-        page_type="CONTENT"
+    # Step 1: Classify page type
+    page_type = llm.classify_page_type(
+        title=request.title,
+        url=request.url,
+        meta_tags=request.meta_tags
     )
     
-    return dummy_response
+    # Step 2: If navigation page, allow automatically
+    if page_type in ["HOMEPAGE", "SEARCH_RESULTS"]:
+        return ClassificationResponse(
+            decision="ALLOW",
+            reason="Navigation page - always allowed",
+            confidence=0.99,
+            page_type=page_type
+        )
+    
+    # Step 3: Check relevance to study goal
+    relevance = llm.classify_relevance(
+        study_goal=request.study_goal,
+        title=request.title,
+        content=request.content_preview or ""
+    )
+    
+    return ClassificationResponse(
+        decision=relevance["decision"],
+        reason=relevance["reason"],
+        confidence=relevance["confidence"],
+        page_type=page_type
+    )
