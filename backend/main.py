@@ -1,61 +1,59 @@
-"""
-Semantic Study Guardian Backend
-Main FastAPI application
-"""
-
 from fastapi import FastAPI
-from .config import OLLAMA_BASE_URL, OLLAMA_MODEL
-from .models import WebPageRequest, ClassificationResponse
-from .llm import llm
+from fastapi.middleware.cors import CORSMiddleware
+from backend.models import WebPageRequest, ClassificationResponse
 
 app = FastAPI(
     title="Semantic Study Guardian",
-    description="LLM-powered webpage classification for focused studying",
-    version="0.1.0"
+    description="Local development backend for routing extension requests to the LLM.",
+    version="1.0.0"
 )
 
+# Open the gates so your Chrome extension can communicate with this server locally
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def health_check():
-    """Health check endpoint."""
-    return {
-        "status": "ok",
-        "message": "Semantic Study Guardian Backend is running",
-        "ollama_url": OLLAMA_BASE_URL,
-        "model": OLLAMA_MODEL
-    }
+    """Simple check to ensure the server is alive."""
+    return {"status": "ok", "message": "Semantic Study Guardian Backend is running!"}
 
-
-@app.post("/classify")
-def classify(request: WebPageRequest) -> ClassificationResponse:
-    """Classify a webpage based on study goal and webpage information."""
+@app.post("/classify", response_model=ClassificationResponse)
+def classify_webpage(request: WebPageRequest):
+    """
+    Receives webpage metadata from the extension.
+    For Day 1, this uses basic dummy logic to prove the network flow works.
+    """
+    url_lower = request.url.lower()
+    title_lower = request.title.lower()
     
-    # Step 1: Classify page type
-    page_type = llm.classify_page_type(
-        title=request.title,
-        url=request.url,
-        meta_tags=request.meta_tags
-    )
-    
-    # Step 2: If navigation page, allow automatically
-    if page_type in ["HOMEPAGE", "SEARCH_RESULTS"]:
+    # Heuristic Rule 1: Always allow primary homepages or search patterns
+    if url_lower.endswith("/") or "search" in url_lower or "results" in url_lower:
         return ClassificationResponse(
             decision="ALLOW",
-            reason="Navigation page - always allowed",
+            reason="Navigation page (Homepage or Search Results) automatically allowed to prevent tracking friction.",
             confidence=0.99,
-            page_type=page_type
+            page_type="HOMEPAGE" if url_lower.endswith("/") else "SEARCH_PAGE"
+        )
+        
+    # Heuristic Rule 2: Basic keyword match for testing content pages
+    study_goal_lower = request.study_goal.lower()
+    if study_goal_lower in title_lower or study_goal_lower in request.visible_text.lower():
+        return ClassificationResponse(
+            decision="ALLOW",
+            reason=f"Content page semantically matches your study goal: '{request.study_goal}'.",
+            confidence=0.85,
+            page_type="CONTENT_PAGE"
         )
     
-    # Step 3: Check relevance to study goal
-    relevance = llm.classify_relevance(
-        study_goal=request.study_goal,
-        title=request.title,
-        content=request.content_preview or ""
-    )
-    
+    # Default rule if it's content but doesn't match the goal
     return ClassificationResponse(
-        decision=relevance["decision"],
-        reason=relevance["reason"],
-        confidence=relevance["confidence"],
-        page_type=page_type
+        decision="BLOCK",
+        reason=f"This content page appears unrelated to your primary study goal: '{request.study_goal}'.",
+        confidence=0.70,
+        page_type="CONTENT_PAGE"
     )

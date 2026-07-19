@@ -1,34 +1,19 @@
 function collectMetaTags() {
     return {
-        description:
-            document.querySelector('meta[name="description"]')?.content || "",
-
-        keywords:
-            document.querySelector('meta[name="keywords"]')?.content || "",
-
-        og_title:
-            document.querySelector('meta[property="og:title"]')?.content || "",
-
-        og_description:
-            document.querySelector('meta[property="og:description"]')?.content || "",
-
-        og_type:
-            document.querySelector('meta[property="og:type"]')?.content || ""
+        description: document.querySelector('meta[name="description"]')?.content || "",
+        keywords: document.querySelector('meta[name="keywords"]')?.content || "",
+        og_title: document.querySelector('meta[property="og:title"]')?.content || "",
+        og_description: document.querySelector('meta[property="og:description"]')?.content || ""
     };
 }
 
 function collectPageData() {
     return {
-        study_goal: "Learn Operating Systems",
-
+        study_goal: "Operating Systems", // Temporary placeholder goal
         url: window.location.href,
-
         title: document.title,
-
         meta_tags: collectMetaTags(),
-
-        visible_text: document.body.innerText,
-
+        visible_text: document.body.innerText.slice(0, 1000), // Grab the first 1000 characters to prevent bloat
         transcript: null
     };
 }
@@ -42,17 +27,18 @@ async function sendToBackend(pageData) {
             },
             body: JSON.stringify(pageData)
         });
-
         const data = await response.json();
-
-        console.log("Response from backend:");
-        console.log(data);
-
+        console.log("Guardian Judgment Received:", data);
+        
+        // If the backend returns a BLOCK decision, throw an immediate alert for our prototype
+        if (data.decision === "BLOCK") {
+            alert(`⚠️ STUDY GUARDIAN BLOCK: \nReason: ${data.reason}`);
+        }
     } catch (error) {
-        console.error("Error communicating with backend:", error);
+        console.error("Communication with Guardian server failed:", error);
     }
 }
 
-const pageData = collectPageData();
-
-sendToBackend(pageData);
+// Fire extraction instantly when the user finishes navigating to a site
+const data = collectPageData();
+sendToBackend(data);

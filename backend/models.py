@@ -1,24 +1,18 @@
 from pydantic import BaseModel
 from typing import Dict, Optional
 
-
 class WebPageRequest(BaseModel):
-    """
-    Schema for the incoming webpage classification request.
-    This is what the Chrome extension will send to our backend.
-    """
+    """The strict format our Chrome Extension must send."""
     study_goal: str
-    title: str
     url: str
+    title: str
     meta_tags: Dict[str, str]
-    content_preview: Optional[str] = None
-
+    visible_text: str
+    transcript: Optional[str] = None
 
 class ClassificationResponse(BaseModel):
-    """
-    Schema for what our backend returns to the Chrome extension.
-    """
+    """The strict format our backend will return to the extension."""
     decision: str  # "ALLOW" or "BLOCK"
     reason: str
-    confidence: float  # 0.0 to 1.0
-    page_type: Optional[str] = None  # "HOMEPAGE", "SEARCH_RESULTS", "CONTENT"
+    confidence: float
+    page_type: Optional[str] = None  # "HOMEPAGE", "SEARCH_PAGE", or "CONTENT_PAGE"
