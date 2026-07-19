@@ -1,14 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from backend.models import WebPageRequest, ClassificationResponse
 
 app = FastAPI(
     title="Semantic Study Guardian",
-    description="Local development backend for routing extension requests to the LLM.",
-    version="1.0.0"
+    description="Production backend routing extension requests to the remote Qwen LLM.",
+    version="2.0.0"
 )
 
-# Open the gates so your Chrome extension can communicate with this server locally
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,43 +17,86 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ollama local endpoint configuration
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+MODEL_NAME = "qwen3:4b"  # Swap to "qwen2.5-coder:7b" later if you want to experiment!
+
 @app.get("/")
 def health_check():
-    """Simple check to ensure the server is alive."""
-    return {"status": "ok", "message": "Semantic Study Guardian Backend is running!"}
+    return {"status": "ok", "message": f"Server running. Model set to {MODEL_NAME}"}
 
 @app.post("/classify", response_model=ClassificationResponse)
-def classify_webpage(request: WebPageRequest):
-    """
-    Receives webpage metadata from the extension.
-    For Day 1, this uses basic dummy logic to prove the network flow works.
-    """
+async def classify_webpage(request: WebPageRequest):
     url_lower = request.url.lower()
-    title_lower = request.title.lower()
     
-    # Heuristic Rule 1: Always allow primary homepages or search patterns
+    # Fast path: Skip LLM processing for bare homepages or search URLs to reduce latency
     if url_lower.endswith("/") or "search" in url_lower or "results" in url_lower:
         return ClassificationResponse(
             decision="ALLOW",
-            reason="Navigation page (Homepage or Search Results) automatically allowed to prevent tracking friction.",
-            confidence=0.99,
-            page_type="HOMEPAGE" if url_lower.endswith("/") else "SEARCH_PAGE"
+            reason="Navigation/search page automatically bypassed.",
+            confidence=1.0,
+            page_type="NAVIGATION"
         )
         
-    # Heuristic Rule 2: Basic keyword match for testing content pages
-    study_goal_lower = request.study_goal.lower()
-    if study_goal_lower in title_lower or study_goal_lower in request.visible_text.lower():
-        return ClassificationResponse(
-            decision="ALLOW",
-            reason=f"Content page semantically matches your study goal: '{request.study_goal}'.",
-            confidence=0.85,
-            page_type="CONTENT_PAGE"
-        )
+    # Build a strict prompt forcing the LLM to think like a classifier
+    prompt = f"""
+    You are an absolute, strict academic firewall called the Semantic Study Guardian.
+    Your task is to analyze if a webpage is relevant to the user's current active study goal.
     
-    # Default rule if it's content but doesn't match the goal
-    return ClassificationResponse(
-        decision="BLOCK",
-        reason=f"This content page appears unrelated to your primary study goal: '{request.study_goal}'.",
-        confidence=0.70,
-        page_type="CONTENT_PAGE"
-    )
+    CRITERIA:
+    - If the webpage content directly helps, informs, or contributes to achieving the study goal, output ALLOW.
+    - If the webpage content is social media, entertainment, general news, or completely unrelated to the goal, output BLOCK.
+    
+    INPUT DATA:
+    - Current Study Goal: {request.study_goal}
+    - Page Title: {request.title}
+    - Snippet of Page Text: {request.visible_text[:800]}
+    
+    OUTPUT FORMAT:
+    You must respond with exactly two lines. Do not include any markdown formatting, asterisks, or extra sentences.
+    Line 1: Either ALLOW or BLOCK
+    Line 2: A short, single-sentence reason for the decision.
+    """
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.post(OLLAMA_URL, json={
+                "model": MODEL_NAME,
+                "prompt": prompt,
+                "stream": False
+            })
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Ollama internal error")
+                
+            result_json = response.json()
+            raw_text = result_json.get("response", "").strip()
+            
+            # Parse the strict two-line output structure
+            lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+            
+            decision = "BLOCK"
+            reason = "Failed to parse model decision safely."
+            
+            if len(lines) >= 1:
+                decision = "ALLOW" if "ALLOW" in lines[0].upper() else "BLOCK"
+            if len(lines) >= 2:
+                reason = lines[1]
+            elif len(lines) == 1:
+                reason = "Evaluated by Qwen LLM engine."
+
+            return ClassificationResponse(
+                decision=decision,
+                reason=reason,
+                confidence=0.85,
+                page_type="CONTENT_PAGE"
+            )
+
+        except httpx.RequestError as e:
+            # Fallback strategy if the LLM cluster gets heavily congested
+            return ClassificationResponse(
+                decision="ALLOW",
+                reason=f"Cluster fallback safety engaged. Error: {str(e)}",
+                confidence=0.50,
+                page_type="FALLBACK"
+            )
