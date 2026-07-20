@@ -1,14 +1,14 @@
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
-from backend.models import WebPageRequest, ClassificationResponse
+import json
 
-app = FastAPI(
-    title="Semantic Study Guardian",
-    description="Production backend routing extension requests to the remote Qwen LLM.",
-    version="2.0.0"
-)
+# Import the strict models you just provided
+from models import WebPageRequest, ClassificationResponse
 
+app = FastAPI(title="Semantic Study Guardian Backend")
+
+# Enable CORS so your local Chrome extension can communicate with this backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,86 +17,88 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ollama local endpoint configuration
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
-MODEL_NAME = "qwen3:4b"  # Swap to "qwen2.5-coder:7b" later if you want to experiment!
-
-@app.get("/")
-def health_check():
-    return {"status": "ok", "message": f"Server running. Model set to {MODEL_NAME}"}
+OLLAMA_TUNNEL_URL = "http://localhost:44543/api/generate"
+MODEL_NAME = "qwen3" 
 
 @app.post("/classify", response_model=ClassificationResponse)
-async def classify_webpage(request: WebPageRequest):
-    url_lower = request.url.lower()
+async def classify_page(request: WebPageRequest):
+    # Format the dictionary of meta tags into a readable string for the LLM
+    meta_tags_str = ", ".join([f"{k}: {v}" for k, v in request.meta_tags.items()])
     
-    # Fast path: Skip LLM processing for bare homepages or search URLs to reduce latency
-    if url_lower.endswith("/") or "search" in url_lower or "results" in url_lower:
-        return ClassificationResponse(
-            decision="ALLOW",
-            reason="Navigation/search page automatically bypassed.",
-            confidence=1.0,
-            page_type="NAVIGATION"
-        )
-        
-    # Build a strict prompt forcing the LLM to think like a classifier
+    # Format the optional transcript if it exists
+    transcript_str = request.transcript if request.transcript else "No transcript available."
+
+    # The single prompt enforcing the exact two-layer architecture
+    # It forces the LLM to output a raw JSON structure so we can populate ClassificationResponse perfectly
     prompt = f"""
-    You are an absolute, strict academic firewall called the Semantic Study Guardian.
-    Your task is to analyze if a webpage is relevant to the user's current active study goal.
+    You are an academic guardian assistant. Analyze the web page data below and determine if the user should be allowed to view it based on their study goal.
     
-    CRITERIA:
-    - If the webpage content directly helps, informs, or contributes to achieving the study goal, output ALLOW.
-    - If the webpage content is social media, entertainment, general news, or completely unrelated to the goal, output BLOCK.
+    USER'S STUDY GOAL: "{request.study_goal}"
     
-    INPUT DATA:
-    - Current Study Goal: {request.study_goal}
-    - Page Title: {request.title}
-    - Snippet of Page Text: {request.visible_text[:800]}
+    CURRENT WEB PAGE DETAILS:
+    - URL: {request.url}
+    - Title: {request.title}
+    - Meta Tags: {meta_tags_str}
+    - Visible Page Text (Snippet): {request.visible_text[:1500]}
+    - Video Transcript (if applicable): {transcript_str[:1500]}
+    
+    CLASSIFICATION STEPS (LAYERED ARCHITECTURE):
+    1. First, evaluate if this is a general "HOMEPAGE" or a "SEARCH_PAGE". If it is, immediately set decision to "ALLOW", page_type to "HOMEPAGE" or "SEARCH_PAGE", and provide a brief reason.
+    2. If it is a specific article, video, or content page ("CONTENT_PAGE"), evaluate whether the visible text or transcript aligns with the user's study goal. If it is relevant, set decision to "ALLOW". If it is a distraction or irrelevant, set decision to "BLOCK".
     
     OUTPUT FORMAT:
-    You must respond with exactly two lines. Do not include any markdown formatting, asterisks, or extra sentences.
-    Line 1: Either ALLOW or BLOCK
-    Line 2: A short, single-sentence reason for the decision.
+    You must respond ONLY with a raw valid JSON object. Do not wrap it in markdown code blocks. Do not write any explanations outside the JSON.
+    
+    Expected JSON Structure:
+    {{
+        "decision": "ALLOW" or "BLOCK",
+        "reason": "A brief explanation of your classification decision.",
+        "confidence": 0.0 to 1.0,
+        "page_type": "HOMEPAGE", "SEARCH_PAGE", or "CONTENT_PAGE"
+    }}
     """
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            response = await client.post(OLLAMA_URL, json={
-                "model": MODEL_NAME,
-                "prompt": prompt,
-                "stream": False
-            })
+    
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "stream": False
+    }
+    
+    try:
+        # Send payload through the local end of the SSH tunnel
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(OLLAMA_TUNNEL_URL, json=payload)
             
             if response.status_code != 200:
-                raise HTTPException(status_code=500, detail="Ollama internal error")
-                
+                raise HTTPException(status_code=502, detail="Failed to communicate with remote Ollama engine.")
+            
             result_json = response.json()
-            raw_text = result_json.get("response", "").strip()
+            raw_llm_text = result_json.get("response", "").strip()
             
-            # Parse the strict two-line output structure
-            lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+            # Parse the clean JSON response out of the LLM output
+            try:
+                parsed_response = json.loads(raw_llm_text)
+                
+                # Return data strictly structured as a ClassificationResponse
+                return ClassificationResponse(
+                    decision=parsed_response.get("decision", "ALLOW").upper(),
+                    reason=parsed_response.get("reason", "Fallback default decision."),
+                    confidence=float(parsed_response.get("confidence", 0.5)),
+                    page_type=parsed_response.get("page_type", "CONTENT_PAGE").upper()
+                )
+            except (json.JSONDecodeError, ValueError) as parse_err:
+                # Fallback implementation if the LLM output deviates from formatting instructions
+                fallback_decision = "BLOCK" if "BLOCK" in raw_llm_text.upper() else "ALLOW"
+                return ClassificationResponse(
+                    decision=fallback_decision,
+                    reason="Parsed from unformatted model output stream.",
+                    confidence=0.5,
+                    page_type="CONTENT_PAGE"
+                )
             
-            decision = "BLOCK"
-            reason = "Failed to parse model decision safely."
-            
-            if len(lines) >= 1:
-                decision = "ALLOW" if "ALLOW" in lines[0].upper() else "BLOCK"
-            if len(lines) >= 2:
-                reason = lines[1]
-            elif len(lines) == 1:
-                reason = "Evaluated by Qwen LLM engine."
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail=f"SSH Tunnel connection error: {exc}")
 
-            return ClassificationResponse(
-                decision=decision,
-                reason=reason,
-                confidence=0.85,
-                page_type="CONTENT_PAGE"
-            )
-
-        except httpx.RequestError as e:
-            # Fallback strategy if the LLM cluster gets heavily congested
-            return ClassificationResponse(
-                decision="ALLOW",
-                reason=f"Cluster fallback safety engaged. Error: {str(e)}",
-                confidence=0.50,
-                page_type="FALLBACK"
-            )
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "location": "local_laptop"}
